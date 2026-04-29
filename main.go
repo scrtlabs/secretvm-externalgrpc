@@ -327,6 +327,25 @@ func (s *secretVmCloudProvider) NodeGroupNodes(ctx context.Context, req *pb.Node
 	defer s.mu.Unlock()
 
 	masterName, _, _ := strings.Cut(domainName, ".")
+
+	actualVMs := make(map[string]bool)
+	for _, vm := range response.Result {
+		if vm.NameFromUser != "" {
+			actualVMs[vm.NameFromUser] = true
+		}
+	}
+
+	for nodeName, inst := range s.instances {
+		if !strings.HasPrefix(nodeName, fmt.Sprintf("%s-worker-%s", masterName, req.Id)) {
+			continue
+		}
+
+		if inst.Status.InstanceState == pb.InstanceStatus_instanceRunning && !actualVMs[nodeName] {
+			log.Printf("Reconciliation Alarm: Node %s was manually deleted outside of the Autoscaler!", nodeName)
+			s.setInstanceState(nodeName, pb.InstanceStatus_unspecified, false)
+		}
+	}
+
 	for _, vm := range response.Result {
 		if !strings.HasPrefix(vm.NameFromUser, fmt.Sprintf("%s-worker-%s", masterName, req.Id)) {
 			continue

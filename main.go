@@ -14,8 +14,9 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/durationpb"
 
 	pb "secretvm-externalgrpc/pb"
 )
@@ -389,8 +390,38 @@ func (s *secretVmCloudProvider) Refresh(ctx context.Context, req *pb.RefreshRequ
 }
 
 func (s *secretVmCloudProvider) NodeGroupGetOptions(ctx context.Context, req *pb.NodeGroupAutoscalingOptionsRequest) (*pb.NodeGroupAutoscalingOptionsResponse, error) {
-	log.Println("NodeGroupGetOptions: using CA global defaults")
-	return nil, status.Error(codes.Unimplemented, "Not implemented, use global defaults")
+	options, ok := proto.Clone(req.GetDefaults()).(*pb.NodeGroupAutoscalingOptions)
+	if !ok || options == nil {
+		options = &pb.NodeGroupAutoscalingOptions{}
+	}
+
+	if envVal, exists := os.LookupEnv("SCALE_DOWN_UNNEEDED_DURATION"); exists && envVal != "" {
+		if parsedDuration, err := time.ParseDuration(envVal); err == nil {
+			options.ScaleDownUnneededDuration = durationpb.New(parsedDuration)
+		}
+	}
+
+	if envVal, exists := os.LookupEnv("MAX_NODE_PROVISION_TIME"); exists && envVal != "" {
+		if parsedDuration, err := time.ParseDuration(envVal); err == nil {
+			options.MaxNodeProvisionDuration = durationpb.New(parsedDuration)
+		}
+	}
+
+	marshaller := protojson.MarshalOptions{
+		Multiline:       true,
+		Indent:          "  ",
+		EmitUnpopulated: true,
+	}
+
+	if jsonBytes, err := marshaller.Marshal(options); err == nil {
+		log.Printf("DEBUG: %s", string(jsonBytes))
+	} else {
+		log.Printf("DEBUG: Failed to format options for logging: %v", err)
+	}
+
+	return &pb.NodeGroupAutoscalingOptionsResponse{
+		NodeGroupAutoscalingOptions: options,
+	}, nil
 }
 
 func (s *secretVmCloudProvider) GPULabel(ctx context.Context, req *pb.GPULabelRequest) (*pb.GPULabelResponse, error) {

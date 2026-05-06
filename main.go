@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
-	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/durationpb"
 
@@ -99,6 +98,12 @@ func (s *secretVmCloudProvider) NodeGroupDecreaseTargetSize(ctx context.Context,
 	defer s.mu.Unlock()
 
 	s.targetSizes[req.Id] += req.Delta
+
+	delta := -int(req.Delta)
+
+	for i := 0; i < min(delta, len(s.creationQueue)); i++ {
+		s.setInstanceState(s.creationQueue[i], pb.InstanceStatus_unspecified, false)
+	}
 	log.Printf("DecreaseTargetSize request: Remove %d from %s", req.Delta, req.Id)
 
 	return &pb.NodeGroupDecreaseTargetSizeResponse{}, nil
@@ -150,8 +155,8 @@ func (s *secretVmCloudProvider) creationWorkerLoop() {
 		nodeName := s.creationQueue[0]
 		s.creationQueue = s.creationQueue[1:]
 
-		if s.instances[nodeName].Status.InstanceState == pb.InstanceStatus_instanceDeleting {
-			log.Printf("Worker skipping creation for %s, it was marked for deletion.", nodeName)
+		if s.instances[nodeName].Status.InstanceState != pb.InstanceStatus_instanceCreating {
+			log.Printf("Worker skipping creation for %s, it was not marked for creation.", nodeName)
 			s.mu.Unlock()
 			continue
 		}
@@ -243,6 +248,9 @@ func (s *secretVmCloudProvider) setInstanceState(nodeName string, instanceStatus
 }
 
 func (s *secretVmCloudProvider) NodeGroupDeleteNodes(ctx context.Context, req *pb.NodeGroupDeleteNodesRequest) (*pb.NodeGroupDeleteNodesResponse, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	log.Printf("Requested to delete %d nodes.", len(req.Nodes))
 
 	apiKey := os.Getenv("SECRETVM_API_KEY")
@@ -272,13 +280,12 @@ func (s *secretVmCloudProvider) NodeGroupDeleteNodes(ctx context.Context, req *p
 	for _, node := range req.Nodes {
 		nodeName := node.Name
 
-		s.mu.Lock()
 		s.setInstanceState(nodeName, pb.InstanceStatus_instanceDeleting, false)
-		s.mu.Unlock()
 
 		vmID, exists := nodeNameToID[nodeName]
 		if !exists {
 			log.Printf("Warning: Node %s requested for deletion but not found via secretvm-cli. Skipping.", nodeName)
+			s.setInstanceState(nodeName, pb.InstanceStatus_unspecified, false)
 			continue
 		}
 
@@ -290,17 +297,14 @@ func (s *secretVmCloudProvider) NodeGroupDeleteNodes(ctx context.Context, req *p
 		deleteOutput, deleteErr := deleteCmd.CombinedOutput()
 		if deleteErr != nil {
 			log.Printf("Failed to delete VM %s (ID: %s). Error: %v, Output: %s", nodeName, vmID, deleteErr, string(deleteOutput))
+			s.setInstanceState(nodeName, pb.InstanceStatus_unspecified, false)
 			continue
 		}
 
-		s.mu.Lock()
 		delete(s.instances, nodeName)
-		s.mu.Unlock()
 	}
 
-	s.mu.Lock()
 	s.targetSizes[req.Id] -= int32(len(req.Nodes))
-	s.mu.Unlock()
 
 	return &pb.NodeGroupDeleteNodesResponse{}, nil
 }
@@ -424,18 +428,6 @@ func (s *secretVmCloudProvider) NodeGroupGetOptions(ctx context.Context, req *pb
 		if parsedDuration, err := time.ParseDuration(envVal); err == nil {
 			options.MaxNodeProvisionDuration = durationpb.New(parsedDuration)
 		}
-	}
-
-	marshaller := protojson.MarshalOptions{
-		Multiline:       true,
-		Indent:          "  ",
-		EmitUnpopulated: true,
-	}
-
-	if jsonBytes, err := marshaller.Marshal(options); err == nil {
-		log.Printf("DEBUG: %s", string(jsonBytes))
-	} else {
-		log.Printf("DEBUG: Failed to format options for logging: %v", err)
 	}
 
 	return &pb.NodeGroupAutoscalingOptionsResponse{

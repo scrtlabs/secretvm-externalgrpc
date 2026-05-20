@@ -51,6 +51,7 @@ services:
   k3s-agent:
     image: rancher/k3s:v1.35.2-k3s1
     container_name: %s
+    network_mode: host
     command: agent
     privileged: true
     restart: always

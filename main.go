@@ -31,6 +31,8 @@ type secretVmCloudProvider struct {
 
 	minSize int32
 	maxSize int32
+
+	masterVmTypeId string
 }
 
 type VMListResponse struct {
@@ -44,6 +46,8 @@ type VM struct {
 	NameFromUser string `json:"nameFromUser"`
 	Status       string `json:"status"`
 	State        string `json:"state"`
+	VmDomain     string `json:"vmDomain"`
+	VmTypeId     string `json:"vmTypeId"`
 }
 
 const agentComposeTemplate = `version: '3'
@@ -73,6 +77,46 @@ func NewSecretVmCloudProvider(minSize, maxSize int32) *secretVmCloudProvider {
 	go provider.creationWorkerLoop()
 
 	return provider
+}
+
+func (s *secretVmCloudProvider) getMasterVMTypeId() string {
+	s.mu.Lock()
+	cachedId := s.masterVmTypeId
+	s.mu.Unlock()
+
+	if cachedId != "" {
+		return cachedId
+	}
+
+	domainName := os.Getenv("SECRETVM_DOMAIN_NAME")
+	apiKey := os.Getenv("SECRETVM_API_KEY")
+
+	cmd := exec.Command("secretvm-cli", "-k", apiKey, "vm", "ls")
+	cmd.Env = append(os.Environ(), "SERVER_BASE_URL=https://preview-aidev.scrtlabs.com")
+
+	output, err := cmd.Output()
+	if err != nil {
+		log.Printf("Failed to list VMs to determine master type: %v", err)
+		return "small"
+	}
+
+	var response VMListResponse
+	if err := json.Unmarshal(output, &response); err != nil {
+		log.Printf("Failed to parse JSON response during master type lookup: %v", err)
+		return "small"
+	}
+
+	for _, vm := range response.Result {
+		if vm.VmDomain == domainName {
+			s.mu.Lock()
+			s.masterVmTypeId = vm.VmTypeId
+			s.mu.Unlock()
+			return vm.VmTypeId
+		}
+	}
+
+	log.Printf("Warning: Master VM with domain %s not found. Defaulting to 'small'", domainName)
+	return "small"
 }
 
 func (s *secretVmCloudProvider) NodeGroups(ctx context.Context, req *pb.NodeGroupsRequest) (*pb.NodeGroupsResponse, error) {
@@ -219,8 +263,10 @@ func (s *secretVmCloudProvider) executeVMCreation(nodeName string) {
 	}
 	tmpFileEnv.Close()
 
+	vmTypeId := s.getMasterVMTypeId()
+
 	cmd := exec.Command("secretvm-cli", "-k", apiKey, "vm", "create",
-		"-n", nodeName, "-t", "small", "-d", tmpFileDockerCompose.Name(), "-e", tmpFileEnv.Name())
+		"-n", nodeName, "-t", vmTypeId, "-d", tmpFileDockerCompose.Name(), "-e", tmpFileEnv.Name())
 	cmd.Env = append(os.Environ(), "SERVER_BASE_URL=https://preview-aidev.scrtlabs.com")
 
 	output, err := cmd.CombinedOutput()
